@@ -1,0 +1,38 @@
+import { setupWorker } from "msw/browser";
+import {
+  authHandlers,
+  rolesHandlers,
+  tenantUsersHandlers,
+  gatewaysHandlers,
+  paymentModesHandlers,
+  settingsHandlers,
+  approvalsHandlers,
+  auditHandlers,
+  broadcastsHandlers,
+  platformTenantsHandlers,
+  platformSubscriptionsHandlers,
+  platformUsersHandlers,
+  platformSecurityHandlers,
+  platformAuditHandlers,
+  platformBroadcastsHandlers,
+  platformSearchHandlers,
+} from "./handlers";
+
+export const worker = setupWorker(
+  ...authHandlers,
+  ...rolesHandlers,
+  ...tenantUsersHandlers,
+  ...gatewaysHandlers,
+  ...paymentModesHandlers,
+  ...settingsHandlers,
+  ...approvalsHandlers,
+  ...auditHandlers,
+  ...broadcastsHandlers,
+  ...platformTenantsHandlers,
+  ...platformSubscriptionsHandlers,
+  ...platformUsersHandlers,
+  ...platformSecurityHandlers,
+  ...platformAuditHandlers,
+  ...platformBroadcastsHandlers,
+  ...platformSearchHandlers,
+);

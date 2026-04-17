@@ -1,0 +1,709 @@
+// Matrix Emart Admin Platform — Phase 1 Schema
+// Generated during Sprint 0 (2026-04-17)
+//
+// RLS NOTE: All tenant-scoped tables are protected by PostgreSQL Row-Level Security.
+// The application sets `app.tenant_id` via set_config() in a transaction-scoped
+// middleware (src/lib/db/tenant-context.ts) before any tenant query executes.
+// Migrations in prisma/migrations/ must apply RLS policies after table creation.
+//
+// ENCRYPTION NOTE: PaymentGateway.apiKeyEncrypted and .apiSecretEncrypted are
+// AES-256-GCM ciphertext strings. Never store or log plaintext credentials.
+// See src/lib/crypto.ts and docs/encryption-rotation.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum TenantStatus {
+  DRAFT
+  PROVISIONING
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  LOCKED
+}
+
+enum GatewayProvider {
+  RAZORPAY
+  CASHFREE
+  JUSPAY
+}
+
+enum GatewayMode {
+  TEST
+  LIVE
+}
+
+enum GatewayStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum PaymentModeCode {
+  UPI
+  COD
+  WALLET
+  DEBIT_CARD
+  CREDIT_CARD
+  NET_BANKING
+}
+
+enum WorkflowStatus {
+  ACTIVE
+  DRAFT
+  ARCHIVED
+}
+
+enum OnTimeoutAction {
+  AUTO_APPROVE
+  ESCALATE
+  REJECT
+}
+
+enum ApprovalInstanceStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  TIMED_OUT
+  REVISION_REQUESTED
+}
+
+enum ApprovalAction {
+  APPROVE
+  REJECT
+  REQUEST_REVISION
+  TIMEOUT_AUTO_APPROVE
+  TIMEOUT_REJECT
+  TIMEOUT_ESCALATE
+}
+
+enum BillingCycle {
+  MONTHLY
+  ANNUAL
+}
+
+enum PricingModel {
+  FIXED
+  USAGE
+}
+
+enum SupportTier {
+  BASIC
+  STANDARD
+  PREMIUM
+}
+
+enum BroadcastType {
+  ANNOUNCEMENT
+  MAINTENANCE
+}
+
+enum BroadcastScope {
+  SINGLE
+  SELECTION
+  ALL
+}
+
+enum PlanChangeMode {
+  IMMEDIATE
+  AT_RENEWAL
+}
+
+enum PlanChangeStatus {
+  PENDING
+  APPLIED
+  CANCELLED
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum DpdpRequestType {
+  ERASURE
+  ACCESS
+}
+
+enum DpdpRequestStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+}
+
+enum TaxType {
+  REGULAR
+  COMPOSITION
+}
+
+// ============================================================================
+// CORE ENTITIES
+// ============================================================================
+
+model Tenant {
+  id                 String       @id @default(cuid())
+  legalName          String
+  // @pii category:financial
+  gstin              String?
+  // @pii category:contact
+  contactEmail       String
+  businessType       String?
+  country            String       @default("IN")
+  status             TenantStatus @default(DRAFT)
+  subscriptionPlanId String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  subscriptionPlan    SubscriptionPlan?      @relation(fields: [subscriptionPlanId], references: [id])
+  users               User[]
+  roles               Role[]
+  paymentGateways     PaymentGateway[]
+  paymentModes        PaymentMode[]
+  auditLogs           AuditLog[]
+  workflows           ApprovalWorkflow[]
+  broadcastReads      TenantBroadcastRead[]
+  metricSnapshots     TenantMetricSnapshot[]
+  featureFlags        TenantFeatureFlag[]
+  planChanges         TenantPlanChange[]
+  dataSubjectRequests DataSubjectRequest[]
+  generalSettings     TenantGeneralSettings?
+  securitySettings    TenantSecuritySettings?
+  taxSettings         TenantTaxSettings?
+
+  @@map("tenants")
+}
+
+model User {
+  id                String     @id @default(cuid())
+  tenantId          String?    // null = platform admin
+  // @pii category:contact
+  email             String     @unique
+  // @pii category:contact
+  name              String
+  roleId            String?
+  status            UserStatus @default(ACTIVE)
+  lastLoginAt       DateTime?
+  passwordHash      String
+  passwordChangedAt DateTime?
+  failedLoginCount  Int        @default(0)
+  lockoutUntil      DateTime?
+  mustResetPassword Boolean    @default(false)
+  twoFactorEnabled  Boolean    @default(false)
+  twoFactorSecret   String?    // AES-256-GCM encrypted
+  // DPDP stub — Phase 1: flag only; erasure execution is manual ops procedure
+  deletedByDpdp     Boolean    @default(false)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  tenant              Tenant?                  @relation(fields: [tenantId], references: [id])
+  role                Role?                    @relation(fields: [roleId], references: [id])
+  initiatedApprovals  ApprovalInstance[]       @relation("InitiatedApprovals")
+  resolvedApprovals   ApprovalInstance[]       @relation("ResolvedApprovals")
+  approvalActions     ApprovalActionRecord[]
+  auditActorLogs      AuditLog[]               @relation("AuditActor")
+  auditImpersonatorLogs AuditLog[]             @relation("AuditImpersonator")
+  featureFlagAudits   TenantFeatureFlagAudit[]
+  broadcastReads      TenantBroadcastRead[]
+  planChanges         TenantPlanChange[]
+  apiKeys             ApiKey[]
+  sentBroadcasts      TenantBroadcast[]
+
+  @@map("users")
+}
+
+model Role {
+  id        String     @id @default(cuid())
+  tenantId  String
+  name      String
+  status    UserStatus @default(ACTIVE)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id])
+  permissions      RolePermission[]
+  users            User[]
+  workflowLevels   WorkflowLevel[]  @relation("ApproverRole")
+  escalationLevels WorkflowLevel[]  @relation("EscalationRole")
+
+  @@unique([tenantId, name])
+  @@map("roles")
+}
+
+model RolePermission {
+  id     String @id @default(cuid())
+  roleId String
+  module String // e.g., "roles"
+  action String // e.g., "create" → JWT claim: "roles.create"
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, module, action])
+  @@map("role_permissions")
+}
+
+// ============================================================================
+// PAYMENT
+// ============================================================================
+
+// api_key and api_secret are NEVER stored in plaintext.
+// They are AES-256-GCM encrypted before write and decrypted on read.
+// See src/lib/crypto.ts for encrypt/decrypt functions.
+model PaymentGateway {
+  id                 String          @id @default(cuid())
+  tenantId           String
+  name               String
+  provider           GatewayProvider
+  apiKeyEncrypted    String          // AES-256-GCM ciphertext
+  apiSecretEncrypted String          // AES-256-GCM ciphertext
+  mode               GatewayMode     @default(TEST)
+  status             GatewayStatus   @default(ACTIVE)
+  routingPriority    Int             @default(1)
+  logoUrl            String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
+  paymentModeGateways PaymentModeGateway[]
+
+  @@map("payment_gateways")
+}
+
+model PaymentMode {
+  id        String          @id @default(cuid())
+  tenantId  String
+  name      String
+  code      PaymentModeCode
+  status    UserStatus      @default(ACTIVE)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  tenant   Tenant               @relation(fields: [tenantId], references: [id])
+  gateways PaymentModeGateway[]
+
+  @@unique([tenantId, code])
+  @@map("payment_modes")
+}
+
+model PaymentModeGateway {
+  modeId        String
+  gatewayId     String
+  priorityOrder Int    @default(1)
+
+  mode    PaymentMode    @relation(fields: [modeId], references: [id], onDelete: Cascade)
+  gateway PaymentGateway @relation(fields: [gatewayId], references: [id], onDelete: Cascade)
+
+  @@id([modeId, gatewayId])
+  @@map("payment_mode_gateways")
+}
+
+// ============================================================================
+// SETTINGS
+// ============================================================================
+
+model TenantGeneralSettings {
+  id             String   @id @default(cuid())
+  tenantId       String   @unique
+  displayName    String?
+  logoUrl        String?
+  faviconUrl     String?
+  seoTitle       String?
+  seoDescription String?
+  seoKeywords    String?
+  websiteUrl     String?
+  // @pii category:contact
+  supportEmail   String?
+  // @pii category:contact
+  phoneNumber    String?
+  // @pii category:contact
+  address        String?
+  facebookUrl    String?
+  twitterUrl     String?
+  instagramUrl   String?
+  playStoreUrl   String?
+  appStoreUrl    String?
+  updatedAt      DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_general_settings")
+}
+
+model TenantSecuritySettings {
+  id                  String   @id @default(cuid())
+  tenantId            String   @unique
+  passwordExpiryDays  Int      @default(90)
+  passwordMinLength   Int      @default(8)
+  maxFailedAttempts   Int      @default(5)
+  lockoutDurationMins Int      @default(30)
+  requireTwoFactor    Boolean  @default(false)
+  ipWhitelist         String[] // CIDR notation — empty = no restriction
+  sessionTimeoutHours Int      @default(8)
+  updatedAt           DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_security_settings")
+}
+
+model TenantTaxSettings {
+  id                  String   @id @default(cuid())
+  tenantId            String   @unique
+  // @pii category:financial
+  gstin               String?  // 15-char alphanumeric, validated on write
+  legalName           String?
+  // @pii category:contact
+  registeredAddress   String?
+  taxType             TaxType?
+  invoicePrefix       String   @default("INV-")
+  invoiceStartNumber  Int      @default(1)
+  termsAndConditions  String?
+  digitalSignatureUrl String?
+  updatedAt           DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_tax_settings")
+}
+
+// ============================================================================
+// APPROVAL WORKFLOW
+// ============================================================================
+
+// Mutable workflow definition — editing creates a new WorkflowVersion snapshot.
+model ApprovalWorkflow {
+  id           String         @id @default(cuid())
+  tenantId     String
+  name         String
+  triggerEvent String         // "product_listing" | "pricing_change" | "order_cancellation" | "vendor_activation"
+  status       WorkflowStatus @default(DRAFT)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  tenant    Tenant            @relation(fields: [tenantId], references: [id])
+  levels    WorkflowLevel[]
+  versions  WorkflowVersion[]
+  instances ApprovalInstance[]
+
+  @@map("approval_workflows")
+}
+
+// Live, mutable level definitions (up to 5 levels per workflow).
+model WorkflowLevel {
+  id               String          @id @default(cuid())
+  workflowId       String
+  levelNumber      Int             // 1–5
+  approverRoleId   String
+  timeoutHours     Int             @default(48)
+  onTimeoutAction  OnTimeoutAction @default(ESCALATE)
+  escalationRoleId String?         // required when onTimeoutAction = ESCALATE
+
+  workflow       ApprovalWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  approverRole   Role             @relation("ApproverRole", fields: [approverRoleId], references: [id])
+  escalationRole Role?            @relation("EscalationRole", fields: [escalationRoleId], references: [id])
+
+  @@unique([workflowId, levelNumber])
+  @@map("workflow_levels")
+}
+
+// Immutable snapshot created when a workflow version is activated.
+// ApprovalInstance.workflowVersionId pins the rules at submission time —
+// in-flight approvals continue under old rules after the workflow is edited.
+model WorkflowVersion {
+  id            String   @id @default(cuid())
+  workflowId    String
+  versionNumber Int
+  activatedAt   DateTime @default(now())
+  activatedBy   String   // user ID
+
+  workflow  ApprovalWorkflow       @relation(fields: [workflowId], references: [id])
+  snapshots WorkflowLevelSnapshot[]
+  instances ApprovalInstance[]
+
+  @@unique([workflowId, versionNumber])
+  @@map("workflow_versions")
+}
+
+// Immutable copy of WorkflowLevel rows at the moment a version was activated.
+model WorkflowLevelSnapshot {
+  id               String          @id @default(cuid())
+  versionId        String
+  levelNumber      Int
+  approverRoleId   String
+  timeoutHours     Int
+  onTimeoutAction  OnTimeoutAction
+  escalationRoleId String?
+
+  version WorkflowVersion @relation(fields: [versionId], references: [id])
+
+  @@unique([versionId, levelNumber])
+  @@map("workflow_level_snapshots")
+}
+
+// Live approval state for a single entity awaiting approval.
+model ApprovalInstance {
+  id                String                 @id @default(cuid())
+  workflowId        String
+  workflowVersionId String                 // immutable — version active at submission
+  entityType        String
+  entityId          String
+  currentLevel      Int                    @default(1)
+  status            ApprovalInstanceStatus @default(PENDING)
+  initiatedBy       String
+  initiatedAt       DateTime               @default(now())
+  resolvedAt        DateTime?
+  resolvedBy        String?
+
+  workflow        ApprovalWorkflow @relation(fields: [workflowId], references: [id])
+  workflowVersion WorkflowVersion  @relation(fields: [workflowVersionId], references: [id])
+  initiator       User             @relation("InitiatedApprovals", fields: [initiatedBy], references: [id])
+  resolver        User?            @relation("ResolvedApprovals", fields: [resolvedBy], references: [id])
+  actions         ApprovalActionRecord[]
+
+  @@map("approval_instances")
+}
+
+// Each approve/reject/revision event in an approval chain.
+model ApprovalActionRecord {
+  id          String         @id @default(cuid())
+  instanceId  String
+  levelNumber Int
+  actorUserId String
+  action      ApprovalAction
+  notes       String?
+  timestamp   DateTime       @default(now())
+
+  instance ApprovalInstance @relation(fields: [instanceId], references: [id])
+  actor    User             @relation(fields: [actorUserId], references: [id])
+
+  @@map("approval_action_records")
+}
+
+// ============================================================================
+// AUDIT LOG — IMMUTABLE
+// RLS policy applied in migration:
+//   DENY UPDATE + DELETE for all application roles (app_user, app_admin)
+//   Row-level tenant isolation: USING (tenant_id = current_setting('app.tenant_id')::text)
+//   Platform audit (tenant_id IS NULL) accessible only to platform_admin role
+// ============================================================================
+model AuditLog {
+  id             String   @id @default(cuid())
+  tenantId       String?  // null = platform-level action
+  userId         String
+  action         String   // e.g., "role.created", "gateway.updated", "tenant.suspended"
+  entityType     String
+  entityId       String
+  beforeState    Json?
+  afterState     Json?
+  ipAddress      String?
+  impersonatedBy String?  // platform user ID if action taken under impersonation
+  timestamp      DateTime @default(now())
+
+  // Impersonated actions write two rows:
+  //   1. tenantId = target tenant → appears in tenant audit log
+  //   2. tenantId = null → appears in platform audit log
+  actor        User  @relation("AuditActor", fields: [userId], references: [id])
+  impersonator User? @relation("AuditImpersonator", fields: [impersonatedBy], references: [id])
+
+  @@index([tenantId, timestamp(sort: Desc)])  // cursor pagination index
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// SUBSCRIPTION & PLATFORM MANAGEMENT
+// ============================================================================
+
+model SubscriptionPlan {
+  id                     String       @id @default(cuid())
+  name                   String       @unique
+  pricingModel           PricingModel @default(FIXED)
+  billingCycle           BillingCycle @default(MONTHLY)
+  currency               String       @default("INR")
+  status                 UserStatus   @default(ACTIVE)
+  maxUsers               Int
+  maxGateways            Int
+  modulesAllowed         String[]
+  apiAccess              Boolean      @default(false)
+  supportTier            SupportTier  @default(BASIC)
+  approvalWorkflowLevels Int          @default(3)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  tenants     Tenant[]
+  planChanges TenantPlanChange[]
+
+  @@map("subscription_plans")
+}
+
+// Queued plan upgrade/downgrade — current plan stays active until effectiveAt
+model TenantPlanChange {
+  id            String           @id @default(cuid())
+  tenantId      String
+  fromPlanId    String?
+  toPlanId      String
+  effectiveMode PlanChangeMode
+  effectiveAt   DateTime
+  initiatedBy   String
+  status        PlanChangeStatus @default(PENDING)
+  createdAt     DateTime         @default(now())
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id])
+  toPlan    SubscriptionPlan @relation(fields: [toPlanId], references: [id])
+  initiator User             @relation(fields: [initiatedBy], references: [id])
+
+  @@map("tenant_plan_changes")
+}
+
+model TenantFeatureFlag {
+  id             String    @id @default(cuid())
+  tenantId       String
+  featureKey     String
+  enabled        Boolean
+  overrideReason String?
+  expiresAt      DateTime?
+  setByUserId    String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant  Tenant                   @relation(fields: [tenantId], references: [id])
+  history TenantFeatureFlagAudit[]
+
+  @@unique([tenantId, featureKey])
+  @@map("tenant_feature_flags")
+}
+
+model TenantFeatureFlagAudit {
+  id          String   @id @default(cuid())
+  flagId      String
+  tenantId    String
+  changedBy   String
+  oldValue    Boolean
+  newValue    Boolean
+  reason      String?
+  changedAt   DateTime @default(now())
+
+  flag      TenantFeatureFlag @relation(fields: [flagId], references: [id])
+  changedByUser User          @relation(fields: [changedBy], references: [id])
+
+  @@map("tenant_feature_flag_audits")
+}
+
+// Written by nightly/hourly analytics cron — read-only by Platform Health Dashboard.
+// Platform Admin reads via GET /api/platform/tenants/:id/metrics.
+model TenantMetricSnapshot {
+  id               String    @id @default(cuid())
+  tenantId         String
+  snapshotDate     DateTime
+  activeUsers30d   Int       @default(0)
+  apiCalls30d      Int       @default(0)
+  errorRate        Float     @default(0)
+  storageBytesUsed BigInt    @default(0)
+  lastLoginAt      DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, snapshotDate])
+  @@map("tenant_metric_snapshots")
+}
+
+// Platform admin → tenant broadcasts (announcements + maintenance notices)
+model TenantBroadcast {
+  id              String         @id @default(cuid())
+  sentByUserId    String         // platform admin user ID
+  scope           BroadcastScope
+  targetTenantIds String[]       // empty = all tenants when scope=ALL
+  subject         String
+  body            String
+  broadcastType   BroadcastType
+  sentAt          DateTime       @default(now())
+
+  sentBy User                  @relation(fields: [sentByUserId], references: [id])
+  reads  TenantBroadcastRead[]
+
+  @@map("tenant_broadcasts")
+}
+
+// Read receipts — one per tenant-user who dismissed the broadcast banner
+model TenantBroadcastRead {
+  id           String   @id @default(cuid())
+  broadcastId  String
+  tenantId     String
+  readByUserId String
+  readAt       DateTime @default(now())
+
+  broadcast TenantBroadcast @relation(fields: [broadcastId], references: [id])
+  tenant    Tenant          @relation(fields: [tenantId], references: [id])
+  reader    User            @relation(fields: [readByUserId], references: [id])
+
+  @@unique([broadcastId, tenantId, readByUserId])
+  @@index([broadcastId, readByUserId])  // broadcast unread index
+  @@map("tenant_broadcast_reads")
+}
+
+// ============================================================================
+// DPDP — PHASE 1: SCHEMA STUB ONLY
+// Phase 1 accepts and stores DPDP requests but does NOT execute data erasures.
+// Erasure execution is a manual ops procedure in Phase 1.
+// Automated erasure workflows are Phase 2 DPDP sprint.
+// THIS PLATFORM IS DPDP-READY (schema prepared), NOT DPDP-COMPLIANT.
+// ============================================================================
+model DataSubjectRequest {
+  id             String            @id @default(cuid())
+  tenantId       String
+  // @pii category:contact
+  requesterEmail String
+  type           DpdpRequestType
+  status         DpdpRequestStatus @default(PENDING)
+  createdAt      DateTime          @default(now())
+  resolvedAt     DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("data_subject_requests")
+}
+
+// PII field registry — maps which DB columns contain PII across all tables.
+// Populated via seed or migration. Consumed by Phase 2 DPDP erasure tooling.
+model PiiField {
+  id          String @id @default(cuid())
+  tableName   String
+  columnName  String
+  piiCategory String // "contact" | "financial" | "identity"
+
+  @@unique([tableName, columnName])
+  @@map("pii_fields")
+}
+
+// ============================================================================
+// API KEYS — SCHEMA STUB (no UI until Phase 2 Developer Settings)
+// ============================================================================
+model ApiKey {
+  id          String       @id @default(cuid())
+  tenantId    String
+  name        String
+  keyHash     String       // bcrypt hash — plaintext key shown once on creation, never stored
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  permissions String[]     // e.g., ["read:approvals", "write:gateway", "read:audit"]
+  status      ApiKeyStatus @default(ACTIVE)
+  createdBy   String
+  createdAt   DateTime     @default(now())
+
+  creator User @relation(fields: [createdBy], references: [id])
+
+  @@map("api_keys")
+}

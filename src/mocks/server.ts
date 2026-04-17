@@ -1,0 +1,38 @@
+import { setupServer } from "msw/node";
+import {
+  authHandlers,
+  rolesHandlers,
+  tenantUsersHandlers,
+  gatewaysHandlers,
+  paymentModesHandlers,
+  settingsHandlers,
+  approvalsHandlers,
+  auditHandlers,
+  broadcastsHandlers,
+  platformTenantsHandlers,
+  platformSubscriptionsHandlers,
+  platformUsersHandlers,
+  platformSecurityHandlers,
+  platformAuditHandlers,
+  platformBroadcastsHandlers,
+  platformSearchHandlers,
+} from "./handlers";
+
+export const server = setupServer(
+  ...authHandlers,
+  ...rolesHandlers,
+  ...tenantUsersHandlers,
+  ...gatewaysHandlers,
+  ...paymentModesHandlers,
+  ...settingsHandlers,
+  ...approvalsHandlers,
+  ...auditHandlers,
+  ...broadcastsHandlers,
+  ...platformTenantsHandlers,
+  ...platformSubscriptionsHandlers,
+  ...platformUsersHandlers,
+  ...platformSecurityHandlers,
+  ...platformAuditHandlers,
+  ...platformBroadcastsHandlers,
+  ...platformSearchHandlers,
+);

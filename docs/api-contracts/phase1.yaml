@@ -1,0 +1,2905 @@
+openapi: 3.1.0
+info:
+  title: Matrix Emart Admin Platform API
+  version: 1.0.0
+  description: |
+    REST API for Platform Admin and Tenant Admin modules.
+    Generated during Sprint 0 (2026-04-17).
+
+    ## Auth
+    All protected endpoints require a valid access token in the `access_token` HTTP-only
+    cookie. The middleware validates the cookie and injects request headers.
+    Clients never set Authorization headers directly.
+
+    ## Error Envelope
+    All errors use a consistent envelope:
+    ```json
+    { "error": { "code": "SNAKE_CASE_CODE", "message": "Human-readable string", "field": "field_name (validation errors only)" } }
+    ```
+
+    ## Rate Limiting
+    - POST /api/auth/login: 10 req/min/IP → 429
+    - POST /api/auth/refresh: 30 req/min/IP → 429
+    - POST /api/tenant/payment-gateways/:id/test: 5 req/min/tenant → 429
+
+    ## Tenant Isolation
+    All /api/tenant/* endpoints read tenant_id from the JWT (never from URL or body).
+    Platform admin tokens (tenant_id=null) on /tenant/* routes return 400 TENANT_ID_REQUIRED.
+
+servers:
+  - url: /api
+    description: Next.js App Router API routes
+
+tags:
+  - name: Auth
+  - name: Tenant — Roles
+  - name: Tenant — Users
+  - name: Tenant — Payment Gateways
+  - name: Tenant — Payment Modes
+  - name: Tenant — Settings
+  - name: Tenant — Approvals
+  - name: Tenant — Audit
+  - name: Tenant — Broadcasts
+  - name: Platform — Tenants
+  - name: Platform — Subscriptions
+  - name: Platform — Users
+  - name: Platform — Security
+  - name: Platform — Audit
+  - name: Platform — Broadcasts
+  - name: Platform — Search
+
+# ==============================================================================
+# COMPONENTS
+# ==============================================================================
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: access_token
+
+  responses:
+    Unauthorized:
+      description: Access token missing or expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error: { code: TOKEN_EXPIRED, message: "Access token expired" }
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error: { code: FORBIDDEN, message: "Insufficient permissions" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error: { code: NOT_FOUND, message: "Resource not found" }
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error: { code: RATE_LIMITED, message: "Too many requests" }
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error: { code: VALIDATION_ERROR, message: "GSTIN checksum invalid", field: "gstin" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code (SCREAMING_SNAKE_CASE)
+            message:
+              type: string
+              description: Human-readable error description
+            field:
+              type: string
+              description: Field name for validation errors
+
+    # ---- AUTH ----------------------------------------------------------------
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+
+    LoginResponse:
+      type: object
+      required: [user, requiresPasswordReset, requiresTwoFactor]
+      properties:
+        user:
+          $ref: "#/components/schemas/AuthUser"
+        requiresPasswordReset:
+          type: boolean
+        requiresTwoFactor:
+          type: boolean
+        concurrentSessionWarning:
+          type: boolean
+          description: True if a previous session was terminated
+
+    AuthUser:
+      type: object
+      required: [id, email, name, role, tenantId, permissions]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        role:
+          type: string
+          enum: [platform_admin, tenant_admin]
+        tenantId:
+          type: string
+          nullable: true
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Flat dot-string permission claims (e.g., "roles.create")
+
+    PasswordResetRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    PasswordResetConfirm:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+        newPassword:
+          type: string
+          minLength: 8
+
+    PasswordChange:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+          minLength: 8
+
+    # ---- ROLES ---------------------------------------------------------------
+
+    Role:
+      type: object
+      required: [id, tenantId, name, status, createdAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+        createdAt:
+          type: string
+          format: date-time
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Flat dot-string permissions on this role
+
+    RoleCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        permissions:
+          type: array
+          items:
+            type: string
+          default: []
+
+    RoleUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+
+    PermissionsUpdate:
+      type: object
+      required: [permissions]
+      properties:
+        permissions:
+          type: array
+          items:
+            type: string
+          description: Complete replacement of role's permission set
+
+    # ---- USERS (TENANT ADMIN) ------------------------------------------------
+
+    TenantUser:
+      type: object
+      required: [id, email, name, roleId, status, createdAt]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        roleId:
+          type: string
+          nullable: true
+        roleName:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, LOCKED]
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        mustResetPassword:
+          type: boolean
+        twoFactorEnabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    TenantUserCreate:
+      type: object
+      required: [email, name, roleId]
+      properties:
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+          minLength: 1
+        roleId:
+          type: string
+
+    TenantUserUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        roleId:
+          type: string
+        email:
+          type: string
+          format: email
+
+    # ---- PAYMENT GATEWAYS ----------------------------------------------------
+
+    PaymentGateway:
+      type: object
+      required: [id, tenantId, name, provider, mode, status, routingPriority, createdAt]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        name:
+          type: string
+        provider:
+          type: string
+          enum: [RAZORPAY, CASHFREE, JUSPAY]
+        apiKey:
+          type: string
+          description: Decrypted API key — present only in GET single gateway response
+        mode:
+          type: string
+          enum: [TEST, LIVE]
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+        routingPriority:
+          type: integer
+          minimum: 1
+        logoUrl:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    PaymentGatewayCreate:
+      type: object
+      required: [name, provider, apiKey, apiSecret, mode]
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+          enum: [RAZORPAY, CASHFREE, JUSPAY]
+        apiKey:
+          type: string
+        apiSecret:
+          type: string
+        mode:
+          type: string
+          enum: [TEST, LIVE]
+        routingPriority:
+          type: integer
+          minimum: 1
+          default: 1
+
+    GatewayTestResult:
+      type: object
+      required: [ok, message]
+      properties:
+        ok:
+          type: boolean
+        message:
+          type: string
+          description: Human-readable result, e.g. "Connected successfully" or "Auth failed: invalid API key"
+
+    # ---- PAYMENT MODES -------------------------------------------------------
+
+    PaymentMode:
+      type: object
+      required: [id, tenantId, name, code, status]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+          enum: [UPI, COD, WALLET, DEBIT_CARD, CREDIT_CARD, NET_BANKING]
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+        gateways:
+          type: array
+          items:
+            type: object
+            properties:
+              gatewayId:
+                type: string
+              gatewayName:
+                type: string
+              priorityOrder:
+                type: integer
+
+    # ---- SETTINGS -----------------------------------------------------------
+
+    GeneralSettings:
+      type: object
+      properties:
+        displayName:
+          type: string
+          nullable: true
+        logoUrl:
+          type: string
+          nullable: true
+        faviconUrl:
+          type: string
+          nullable: true
+        seoTitle:
+          type: string
+          nullable: true
+        seoDescription:
+          type: string
+          nullable: true
+        seoKeywords:
+          type: string
+          nullable: true
+        websiteUrl:
+          type: string
+          nullable: true
+        supportEmail:
+          type: string
+          format: email
+          nullable: true
+        phoneNumber:
+          type: string
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        facebookUrl:
+          type: string
+          nullable: true
+        twitterUrl:
+          type: string
+          nullable: true
+        instagramUrl:
+          type: string
+          nullable: true
+        playStoreUrl:
+          type: string
+          nullable: true
+        appStoreUrl:
+          type: string
+          nullable: true
+
+    SecuritySettings:
+      type: object
+      properties:
+        passwordExpiryDays:
+          type: integer
+          minimum: 30
+          maximum: 365
+          default: 90
+        passwordMinLength:
+          type: integer
+          minimum: 8
+          maximum: 32
+          default: 8
+        maxFailedAttempts:
+          type: integer
+          minimum: 3
+          maximum: 20
+          default: 5
+        lockoutDurationMins:
+          type: integer
+          minimum: 5
+          maximum: 1440
+          default: 30
+        requireTwoFactor:
+          type: boolean
+          default: false
+        ipWhitelist:
+          type: array
+          items:
+            type: string
+            description: CIDR notation (e.g., "192.168.1.0/24")
+          default: []
+        sessionTimeoutHours:
+          type: integer
+          minimum: 1
+          maximum: 24
+          default: 8
+
+    TaxSettings:
+      type: object
+      properties:
+        gstin:
+          type: string
+          nullable: true
+          pattern: "^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
+          description: 15-character GSTIN — validated against alphanumeric checksum
+        legalName:
+          type: string
+          nullable: true
+        registeredAddress:
+          type: string
+          nullable: true
+        taxType:
+          type: string
+          enum: [REGULAR, COMPOSITION]
+          nullable: true
+        invoicePrefix:
+          type: string
+          default: "INV-"
+        invoiceStartNumber:
+          type: integer
+          minimum: 1
+          default: 1
+        termsAndConditions:
+          type: string
+          nullable: true
+        digitalSignatureUrl:
+          type: string
+          nullable: true
+
+    # ---- APPROVAL WORKFLOWS -------------------------------------------------
+
+    ApprovalWorkflow:
+      type: object
+      required: [id, name, triggerEvent, status, levels, createdAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        triggerEvent:
+          type: string
+          enum: [product_listing, pricing_change, order_cancellation, vendor_activation]
+        status:
+          type: string
+          enum: [ACTIVE, DRAFT, ARCHIVED]
+        levels:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowLevel"
+        currentVersionId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    WorkflowLevel:
+      type: object
+      required: [levelNumber, approverRoleId, timeoutHours, onTimeoutAction]
+      properties:
+        levelNumber:
+          type: integer
+          minimum: 1
+          maximum: 5
+        approverRoleId:
+          type: string
+        approverRoleName:
+          type: string
+        timeoutHours:
+          type: integer
+          minimum: 1
+          default: 48
+        onTimeoutAction:
+          type: string
+          enum: [AUTO_APPROVE, ESCALATE, REJECT]
+        escalationRoleId:
+          type: string
+          nullable: true
+          description: Required when onTimeoutAction = ESCALATE
+
+    WorkflowCreate:
+      type: object
+      required: [name, triggerEvent, levels]
+      properties:
+        name:
+          type: string
+        triggerEvent:
+          type: string
+          enum: [product_listing, pricing_change, order_cancellation, vendor_activation]
+        levels:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/WorkflowLevel"
+
+    ApprovalInstance:
+      type: object
+      required: [id, workflowId, entityType, entityId, currentLevel, status, initiatedAt]
+      properties:
+        id:
+          type: string
+        workflowId:
+          type: string
+        workflowName:
+          type: string
+        entityType:
+          type: string
+        entityId:
+          type: string
+        currentLevel:
+          type: integer
+        status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED, TIMED_OUT, REVISION_REQUESTED]
+        initiatedBy:
+          type: string
+        initiatedByName:
+          type: string
+        initiatedAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalActionRecord"
+
+    ApprovalActionRecord:
+      type: object
+      required: [id, levelNumber, actorUserId, action, timestamp]
+      properties:
+        id:
+          type: string
+        levelNumber:
+          type: integer
+        actorUserId:
+          type: string
+        actorName:
+          type: string
+        action:
+          type: string
+          enum: [APPROVE, REJECT, REQUEST_REVISION, TIMEOUT_AUTO_APPROVE, TIMEOUT_REJECT, TIMEOUT_ESCALATE]
+        notes:
+          type: string
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time
+
+    ApprovalActionRequest:
+      type: object
+      properties:
+        notes:
+          type: string
+          description: Optional notes — required when action = REQUEST_REVISION
+
+    # ---- AUDIT LOG ----------------------------------------------------------
+
+    AuditLogEntry:
+      type: object
+      required: [id, userId, action, entityType, entityId, timestamp]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+          nullable: true
+        userId:
+          type: string
+        userName:
+          type: string
+        action:
+          type: string
+        entityType:
+          type: string
+        entityId:
+          type: string
+        beforeState:
+          type: object
+          nullable: true
+          additionalProperties: true
+        afterState:
+          type: object
+          nullable: true
+          additionalProperties: true
+        ipAddress:
+          type: string
+          nullable: true
+        impersonatedBy:
+          type: string
+          nullable: true
+        impersonatedByName:
+          type: string
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time
+
+    AuditLogPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLogEntry"
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for next page — null if no more results
+
+    # ---- PLATFORM — TENANTS ------------------------------------------------
+
+    Tenant:
+      type: object
+      required: [id, legalName, contactEmail, status, createdAt]
+      properties:
+        id:
+          type: string
+        legalName:
+          type: string
+        gstin:
+          type: string
+          nullable: true
+        contactEmail:
+          type: string
+          format: email
+        businessType:
+          type: string
+          nullable: true
+        country:
+          type: string
+          default: "IN"
+        status:
+          type: string
+          enum: [DRAFT, PROVISIONING, ACTIVE, SUSPENDED, TERMINATED]
+        subscriptionPlanId:
+          type: string
+          nullable: true
+        subscriptionPlanName:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    TenantWithHealth:
+      allOf:
+        - $ref: "#/components/schemas/Tenant"
+        - type: object
+          properties:
+            metrics:
+              type: object
+              nullable: true
+              properties:
+                activeUsers30d:
+                  type: integer
+                apiCalls30d:
+                  type: integer
+                errorRate:
+                  type: number
+                storageBytesUsed:
+                  type: integer
+                lastLoginAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+            onboardingChecklist:
+              type: object
+              properties:
+                gstinConfigured:
+                  type: boolean
+                firstAdminInvited:
+                  type: boolean
+                paymentGatewayAdded:
+                  type: boolean
+                firstRoleCreated:
+                  type: boolean
+                approvalWorkflowSetup:
+                  type: boolean
+
+    TenantCreate:
+      type: object
+      required: [legalName, contactEmail]
+      properties:
+        legalName:
+          type: string
+        gstin:
+          type: string
+          nullable: true
+        contactEmail:
+          type: string
+          format: email
+        businessType:
+          type: string
+          nullable: true
+        country:
+          type: string
+          default: "IN"
+
+    TenantLifecycleAction:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: Required for audit log — why this transition is happening
+        confirmation:
+          type: string
+          description: For TERMINATE — must match tenant legal name
+
+    ImpersonateResponse:
+      type: object
+      required: [message, expiresAt]
+      properties:
+        message:
+          type: string
+          example: "Impersonation session started. Token expires in 30 minutes."
+        expiresAt:
+          type: string
+          format: date-time
+
+    FeatureFlag:
+      type: object
+      required: [featureKey, enabled]
+      properties:
+        featureKey:
+          type: string
+        enabled:
+          type: boolean
+        overrideReason:
+          type: string
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ---- PLATFORM — SUBSCRIPTIONS -------------------------------------------
+
+    SubscriptionPlan:
+      type: object
+      required: [id, name, pricingModel, billingCycle, currency, status]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        pricingModel:
+          type: string
+          enum: [FIXED, USAGE]
+        billingCycle:
+          type: string
+          enum: [MONTHLY, ANNUAL]
+        currency:
+          type: string
+          default: INR
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+        maxUsers:
+          type: integer
+        maxGateways:
+          type: integer
+        modulesAllowed:
+          type: array
+          items:
+            type: string
+        apiAccess:
+          type: boolean
+        supportTier:
+          type: string
+          enum: [BASIC, STANDARD, PREMIUM]
+        approvalWorkflowLevels:
+          type: integer
+
+    TenantPlanAssign:
+      type: object
+      required: [planId, effectiveMode]
+      properties:
+        planId:
+          type: string
+        effectiveMode:
+          type: string
+          enum: [IMMEDIATE, AT_RENEWAL]
+
+    # ---- PLATFORM — BROADCASTS ----------------------------------------------
+
+    BroadcastCreate:
+      type: object
+      required: [subject, body, broadcastType, scope]
+      properties:
+        subject:
+          type: string
+        body:
+          type: string
+        broadcastType:
+          type: string
+          enum: [ANNOUNCEMENT, MAINTENANCE]
+        scope:
+          type: string
+          enum: [SINGLE, SELECTION, ALL]
+        targetTenantIds:
+          type: array
+          items:
+            type: string
+          description: Required when scope = SINGLE or SELECTION
+
+    Broadcast:
+      type: object
+      required: [id, subject, body, broadcastType, scope, sentAt]
+      properties:
+        id:
+          type: string
+        subject:
+          type: string
+        body:
+          type: string
+        broadcastType:
+          type: string
+          enum: [ANNOUNCEMENT, MAINTENANCE]
+        scope:
+          type: string
+          enum: [SINGLE, SELECTION, ALL]
+        sentAt:
+          type: string
+          format: date-time
+        sentByName:
+          type: string
+
+    # ---- PLATFORM — USERS ---------------------------------------------------
+
+    PlatformUser:
+      type: object
+      required: [id, email, name, role, status, createdAt]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        department:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [SUPER_ADMIN, SUPPORT_ADMIN, FINANCE_ADMIN, CATALOGUE_ADMIN]
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    PlatformUserCreate:
+      type: object
+      required: [email, name, role]
+      properties:
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        department:
+          type: string
+        role:
+          type: string
+          enum: [SUPER_ADMIN, SUPPORT_ADMIN, FINANCE_ADMIN, CATALOGUE_ADMIN]
+
+    PlatformSecuritySettings:
+      type: object
+      properties:
+        passwordExpiryDays:
+          type: integer
+          minimum: 30
+          default: 90
+        passwordMinLength:
+          type: integer
+          minimum: 12
+          default: 12
+          description: Platform admins have stricter minimum (12 vs tenant admin 8)
+        maxFailedAttempts:
+          type: integer
+          default: 5
+        lockoutDurationMins:
+          type: integer
+          default: 30
+        ipWhitelist:
+          type: array
+          items:
+            type: string
+
+    SearchResult:
+      type: object
+      required: [tenantId, legalName, contactEmail, status]
+      properties:
+        tenantId:
+          type: string
+        legalName:
+          type: string
+        gstin:
+          type: string
+          nullable: true
+        contactEmail:
+          type: string
+          format: email
+        status:
+          type: string
+          enum: [DRAFT, PROVISIONING, ACTIVE, SUSPENDED, TERMINATED]
+
+# ==============================================================================
+# PATHS
+# ==============================================================================
+paths:
+
+  # ============================================================================
+  # AUTH
+  # ============================================================================
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login with email + password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful — access_token + refresh_token set as HTTP-only cookies
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalid_credentials:
+                  value:
+                    error: { code: INVALID_CREDENTIALS, message: "Email or password is incorrect" }
+                account_locked:
+                  value:
+                    error: { code: ACCOUNT_LOCKED, message: "Account locked until 2026-04-17T10:30:00Z" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token using refresh_token cookie
+      responses:
+        "200":
+          description: New access token issued — cookie updated with current permissions from DB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Refresh token expired or session revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout — clears cookies and invalidates Redis session
+      security:
+        - cookieAuth: []
+      responses:
+        "204":
+          description: Logged out
+
+  /auth/password/reset-request:
+    post:
+      tags: [Auth]
+      summary: Request a password reset email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequest"
+      responses:
+        "204":
+          description: Reset email sent if account exists (always returns 204 to prevent enumeration)
+
+  /auth/password/reset:
+    post:
+      tags: [Auth]
+      summary: Reset password using token from email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetConfirm"
+      responses:
+        "204":
+          description: Password reset successful
+        "400":
+          description: Token invalid or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: RESET_TOKEN_INVALID, message: "Reset token is invalid or has expired" }
+
+  /auth/password/change:
+    post:
+      tags: [Auth]
+      summary: Change own password (authenticated)
+      description: Blocked during impersonation sessions (403 IMPERSONATION_RESTRICTED)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordChange"
+      responses:
+        "204":
+          description: Password changed
+        "400":
+          description: Current password incorrect or new password fails policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Blocked during impersonation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: IMPERSONATION_RESTRICTED, message: "Password changes are not allowed during impersonation sessions" }
+
+  # ============================================================================
+  # TENANT — ROLES
+  # ============================================================================
+
+  /tenant/roles:
+    get:
+      tags: [Tenant — Roles]
+      summary: List roles for the authenticated tenant
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE]
+      responses:
+        "200":
+          description: Roles list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Role"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Tenant — Roles]
+      summary: Create a new role
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleCreate"
+      responses:
+        "201":
+          description: Role created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Role name already exists in this tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: DUPLICATE_ROLE_NAME, message: "A role with this name already exists", field: "name" }
+
+  /tenant/roles/{roleId}:
+    parameters:
+      - name: roleId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Tenant — Roles]
+      summary: Get role with permissions
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Tenant — Roles]
+      summary: Update role name or status
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleUpdate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Tenant — Roles]
+      summary: Soft-delete a role (status → INACTIVE)
+      description: Cannot delete a role assigned to active users
+      security:
+        - cookieAuth: []
+      responses:
+        "204":
+          description: Role deactivated
+        "409":
+          description: Role is assigned to active users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: ROLE_IN_USE, message: "Cannot delete a role assigned to 3 active users" }
+
+  /tenant/roles/{roleId}/permissions:
+    parameters:
+      - name: roleId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      tags: [Tenant — Roles]
+      summary: Replace role's complete permission set
+      description: Full replacement — send the complete desired permission set, not a delta
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PermissionsUpdate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "400":
+          description: Unknown permission strings in request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  # ============================================================================
+  # TENANT — USERS
+  # ============================================================================
+
+  /tenant/users:
+    get:
+      tags: [Tenant — Users]
+      summary: List admin users for the tenant
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TenantUser"
+                  total:
+                    type: integer
+                  planLimit:
+                    type: integer
+                    description: max_users from subscription plan
+    post:
+      tags: [Tenant — Users]
+      summary: Invite a new admin user — sends activation email
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantUserCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantUser"
+        "402":
+          description: Plan user limit reached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: PLAN_LIMIT_REACHED, message: "Your plan allows 10 users. Upgrade to add more." }
+        "409":
+          description: Email already in use
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /tenant/users/{userId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Tenant — Users]
+      summary: Get user details
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantUser"
+    put:
+      tags: [Tenant — Users]
+      summary: Update user name, email, or role
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantUserUpdate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantUser"
+
+  /tenant/users/{userId}/status:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      tags: [Tenant — Users]
+      summary: Toggle user status (ACTIVE ↔ INACTIVE). Immediately invalidates Redis session.
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, INACTIVE]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantUser"
+
+  # ============================================================================
+  # TENANT — PAYMENT GATEWAYS
+  # ============================================================================
+
+  /tenant/payment-gateways:
+    get:
+      tags: [Tenant — Payment Gateways]
+      summary: List payment gateways (api_key omitted from list view)
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentGateway"
+                  planLimit:
+                    type: integer
+    post:
+      tags: [Tenant — Payment Gateways]
+      summary: Add a payment gateway — credentials encrypted before storage
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentGatewayCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentGateway"
+        "402":
+          description: Plan gateway limit reached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /tenant/payment-gateways/{gatewayId}:
+    parameters:
+      - name: gatewayId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Tenant — Payment Gateways]
+      summary: Get gateway details including decrypted api_key
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentGateway"
+        "500":
+          description: Credential decrypt failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: GATEWAY_CREDENTIAL_UNAVAILABLE, message: "Gateway credentials could not be decrypted" }
+    put:
+      tags: [Tenant — Payment Gateways]
+      summary: Update gateway — new credentials re-encrypted on write
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentGatewayCreate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentGateway"
+    delete:
+      tags: [Tenant — Payment Gateways]
+      summary: Remove gateway (hard delete — removes encrypted credentials)
+      security:
+        - cookieAuth: []
+      responses:
+        "204":
+          description: Gateway deleted
+
+  /tenant/payment-gateways/{gatewayId}/test:
+    parameters:
+      - name: gatewayId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Tenant — Payment Gateways]
+      summary: Test gateway connectivity — Razorpay and Cashfree only in Phase 1
+      description: |
+        Decrypts stored credentials and calls the gateway's verification endpoint.
+        Razorpay: GET /v1/accounts ping.
+        Cashfree: POST /pg/orders dry-run.
+        Juspay: Phase 1.5 — returns 501 NOT_IMPLEMENTED if provider = JUSPAY.
+        Rate limited: 5 req/min/tenant.
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayTestResult"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "501":
+          description: Gateway test not yet implemented for this provider
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: NOT_IMPLEMENTED, message: "Gateway test for JUSPAY is available in Phase 1.5" }
+
+  /tenant/payment-gateways/{gatewayId}/status:
+    parameters:
+      - name: gatewayId
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      tags: [Tenant — Payment Gateways]
+      summary: Toggle gateway status (ACTIVE ↔ INACTIVE)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, INACTIVE]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentGateway"
+
+  # ============================================================================
+  # TENANT — PAYMENT MODES
+  # ============================================================================
+
+  /tenant/payment-modes:
+    get:
+      tags: [Tenant — Payment Modes]
+      summary: List payment modes with gateway assignments
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentMode"
+    post:
+      tags: [Tenant — Payment Modes]
+      summary: Create or enable a payment mode
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, code]
+              properties:
+                name:
+                  type: string
+                code:
+                  type: string
+                  enum: [UPI, COD, WALLET, DEBIT_CARD, CREDIT_CARD, NET_BANKING]
+                gatewayIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentMode"
+        "409":
+          description: Payment mode with this code already exists for tenant
+
+  /tenant/payment-modes/{modeId}:
+    parameters:
+      - name: modeId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      tags: [Tenant — Payment Modes]
+      summary: Update mode name and gateway assignments
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                gatewayIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentMode"
+
+  /tenant/payment-modes/{modeId}/status:
+    parameters:
+      - name: modeId
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      tags: [Tenant — Payment Modes]
+      summary: Toggle payment mode status
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, INACTIVE]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentMode"
+
+  # ============================================================================
+  # TENANT — SETTINGS
+  # ============================================================================
+
+  /tenant/settings/general:
+    get:
+      tags: [Tenant — Settings]
+      summary: Get general settings
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneralSettings"
+    put:
+      tags: [Tenant — Settings]
+      summary: Update general settings
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeneralSettings"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneralSettings"
+
+  /tenant/settings/security:
+    get:
+      tags: [Tenant — Settings]
+      summary: Get security settings
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecuritySettings"
+    put:
+      tags: [Tenant — Settings]
+      summary: Update security settings
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecuritySettings"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecuritySettings"
+
+  /tenant/settings/tax:
+    get:
+      tags: [Tenant — Settings]
+      summary: Get tax settings (GSTIN, invoice template)
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaxSettings"
+    put:
+      tags: [Tenant — Settings]
+      summary: Update tax settings — GSTIN validated against 15-char alphanumeric checksum
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaxSettings"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaxSettings"
+        "400":
+          description: GSTIN checksum invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: INVALID_GSTIN, message: "GSTIN checksum is invalid", field: "gstin" }
+
+  # ============================================================================
+  # TENANT — APPROVALS
+  # ============================================================================
+
+  /tenant/approvals/workflows:
+    get:
+      tags: [Tenant — Approvals]
+      summary: List approval workflows
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ApprovalWorkflow"
+    post:
+      tags: [Tenant — Approvals]
+      summary: Create a workflow (starts in DRAFT status)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalWorkflow"
+
+  /tenant/approvals/workflows/{workflowId}:
+    parameters:
+      - name: workflowId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Tenant — Approvals]
+      summary: Get workflow with levels
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalWorkflow"
+    put:
+      tags: [Tenant — Approvals]
+      summary: Update workflow definition (levels replaced entirely)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowCreate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalWorkflow"
+    delete:
+      tags: [Tenant — Approvals]
+      summary: Archive workflow (status → ARCHIVED). Cannot delete with active instances.
+      security:
+        - cookieAuth: []
+      responses:
+        "204":
+          description: Archived
+        "409":
+          description: Active approval instances exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /tenant/approvals/workflows/{workflowId}/activate:
+    parameters:
+      - name: workflowId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Tenant — Approvals]
+      summary: Activate workflow — creates WorkflowVersion + WorkflowLevelSnapshot
+      description: |
+        Activates the workflow (status DRAFT → ACTIVE).
+        Creates an immutable WorkflowVersion + WorkflowLevelSnapshot.
+        New ApprovalInstance submissions will reference this version.
+        In-flight instances continue under their original version.
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalWorkflow"
+        "400":
+          description: Workflow has no levels or escalation_role_id missing where required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /tenant/approvals/instances:
+    get:
+      tags: [Tenant — Approvals]
+      summary: List approval instances
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, APPROVED, REJECTED, TIMED_OUT, REVISION_REQUESTED]
+        - name: entityType
+          in: query
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ApprovalInstance"
+                  nextCursor:
+                    type: string
+                    nullable: true
+
+  /tenant/approvals/instances/{instanceId}:
+    parameters:
+      - name: instanceId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Tenant — Approvals]
+      summary: Get instance with full action history
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalInstance"
+
+  /tenant/approvals/instances/{instanceId}/approve:
+    parameters:
+      - name: instanceId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Tenant — Approvals]
+      summary: Approve current level
+      security:
+        - cookieAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalActionRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalInstance"
+        "403":
+          description: User's role does not match approver_role_id for current level
+
+  /tenant/approvals/instances/{instanceId}/reject:
+    parameters:
+      - name: instanceId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Tenant — Approvals]
+      summary: Reject at current level
+      security:
+        - cookieAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalActionRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalInstance"
+
+  /tenant/approvals/instances/{instanceId}/revision:
+    parameters:
+      - name: instanceId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Tenant — Approvals]
+      summary: Request revision — returns instance to initiator
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalActionRequest"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalInstance"
+
+  # ============================================================================
+  # TENANT — AUDIT LOG
+  # ============================================================================
+
+  /tenant/audit:
+    get:
+      tags: [Tenant — Audit]
+      summary: Query audit log with cursor pagination
+      description: Uses cursor-based pagination (not LIMIT/OFFSET) — index on (tenant_id, timestamp DESC)
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Opaque cursor from previous page response
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: userId
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: entityType
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogPage"
+
+  /tenant/audit/export:
+    get:
+      tags: [Tenant — Audit]
+      summary: Export audit log as CSV or Excel
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx]
+            default: csv
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: File download
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+
+  # ============================================================================
+  # TENANT — BROADCASTS (read receipts)
+  # ============================================================================
+
+  /tenant/broadcasts/unread:
+    get:
+      tags: [Tenant — Broadcasts]
+      summary: Get unread broadcasts for tenant — called on every login
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Broadcast"
+
+  /tenant/broadcasts/{broadcastId}/read:
+    parameters:
+      - name: broadcastId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Tenant — Broadcasts]
+      summary: Mark broadcast as read (dismiss banner)
+      security:
+        - cookieAuth: []
+      responses:
+        "204":
+          description: Read receipt created
+
+  # ============================================================================
+  # PLATFORM — TENANTS
+  # ============================================================================
+
+  /platform/tenants:
+    get:
+      tags: [Platform — Tenants]
+      summary: List all tenants with health metrics (precomputed snapshot JOIN — no N+1)
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [DRAFT, PROVISIONING, ACTIVE, SUSPENDED, TERMINATED]
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TenantWithHealth"
+                  nextCursor:
+                    type: string
+                    nullable: true
+    post:
+      tags: [Platform — Tenants]
+      summary: Create a new tenant (status = DRAFT)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+
+  /platform/tenants/{tenantId}:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Platform — Tenants]
+      summary: Get tenant details with onboarding checklist
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantWithHealth"
+    put:
+      tags: [Platform — Tenants]
+      summary: Update tenant details
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantCreate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+
+  /platform/tenants/{tenantId}/suspend:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Platform — Tenants]
+      summary: Suspend tenant (ACTIVE → SUSPENDED)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantLifecycleAction"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+
+  /platform/tenants/{tenantId}/activate:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Platform — Tenants]
+      summary: Activate tenant (PROVISIONING or SUSPENDED → ACTIVE)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantLifecycleAction"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          description: Onboarding checklist not complete (mandatory items missing)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: ONBOARDING_INCOMPLETE, message: "Cannot activate: GSTIN and payment gateway required" }
+
+  /platform/tenants/{tenantId}/terminate:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Platform — Tenants]
+      summary: Terminate tenant — irreversible after 30-day data hold
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantLifecycleAction"
+              description: confirmation must match tenant's legalName
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          description: Confirmation name does not match
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /platform/tenants/{tenantId}/resend-credentials:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Platform — Tenants]
+      summary: Re-send activation email to tenant's registered address
+      security:
+        - cookieAuth: []
+      responses:
+        "204":
+          description: Email sent
+
+  /platform/tenants/{tenantId}/impersonate:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Platform — Tenants]
+      summary: Start impersonation session — issues scoped 30-min non-renewable JWT
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Scoped impersonation token set as HTTP-only cookie
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpersonateResponse"
+        "403":
+          description: Cannot impersonate a TERMINATED tenant
+
+  /platform/tenants/{tenantId}/metrics:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Platform — Tenants]
+      summary: Get latest metric snapshot for a tenant
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activeUsers30d:
+                    type: integer
+                  apiCalls30d:
+                    type: integer
+                  errorRate:
+                    type: number
+                  storageBytesUsed:
+                    type: integer
+                  lastLoginAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  snapshotDate:
+                    type: string
+                    format: date-time
+
+  /platform/tenants/{tenantId}/flags:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Platform — Tenants]
+      summary: List feature flag overrides for tenant
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeatureFlag"
+
+  /platform/tenants/{tenantId}/flags/{featureKey}:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: featureKey
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      tags: [Platform — Tenants]
+      summary: Set feature flag override for tenant
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeatureFlag"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeatureFlag"
+
+  /platform/tenants/{tenantId}/subscription:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Platform — Tenants]
+      summary: Assign or change subscription plan
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantPlanAssign"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          description: Downgrade would exceed tenant's current usage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error: { code: DOWNGRADE_EXCEEDS_USAGE, message: "Tenant has 12 users but new plan allows 10. Confirm to deactivate excess users." }
+
+  # ============================================================================
+  # PLATFORM — SUBSCRIPTIONS
+  # ============================================================================
+
+  /platform/subscriptions:
+    get:
+      tags: [Platform — Subscriptions]
+      summary: List subscription plans
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SubscriptionPlan"
+    post:
+      tags: [Platform — Subscriptions]
+      summary: Create a subscription plan
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionPlan"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionPlan"
+
+  /platform/subscriptions/{planId}:
+    parameters:
+      - name: planId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Platform — Subscriptions]
+      summary: Get plan details
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionPlan"
+    put:
+      tags: [Platform — Subscriptions]
+      summary: Update plan (entitlements updated immediately for tenants on this plan)
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionPlan"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionPlan"
+
+  # ============================================================================
+  # PLATFORM — USERS
+  # ============================================================================
+
+  /platform/users:
+    get:
+      tags: [Platform — Users]
+      summary: List platform admin users
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PlatformUser"
+    post:
+      tags: [Platform — Users]
+      summary: Invite platform admin — sends activation email
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformUserCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUser"
+
+  /platform/users/{userId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Platform — Users]
+      summary: Get platform user
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUser"
+    put:
+      tags: [Platform — Users]
+      summary: Update platform user
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformUserCreate"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUser"
+
+  /platform/users/{userId}/status:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      tags: [Platform — Users]
+      summary: Toggle platform user status — immediately invalidates Redis session
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, INACTIVE]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUser"
+
+  # ============================================================================
+  # PLATFORM — SECURITY
+  # ============================================================================
+
+  /platform/security:
+    get:
+      tags: [Platform — Security]
+      summary: Get platform-level security settings
+      description: Separate from /tenant/settings/security — governs platform admin users only
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformSecuritySettings"
+    put:
+      tags: [Platform — Security]
+      summary: Update platform security settings
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformSecuritySettings"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformSecuritySettings"
+
+  # ============================================================================
+  # PLATFORM — AUDIT LOG
+  # ============================================================================
+
+  /platform/audit:
+    get:
+      tags: [Platform — Audit]
+      summary: Query platform audit log (cursor pagination)
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+        - name: userId
+          in: query
+          schema:
+            type: string
+        - name: tenantId
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogPage"
+
+  /platform/audit/export:
+    get:
+      tags: [Platform — Audit]
+      summary: Export platform audit log
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, xlsx]
+            default: csv
+      responses:
+        "200":
+          description: File download
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+
+  # ============================================================================
+  # PLATFORM — BROADCASTS
+  # ============================================================================
+
+  /platform/broadcasts:
+    get:
+      tags: [Platform — Broadcasts]
+      summary: List all sent broadcasts
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Broadcast"
+    post:
+      tags: [Platform — Broadcasts]
+      summary: Send announcement or maintenance notice to tenants
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BroadcastCreate"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Broadcast"
+        "400":
+          description: targetTenantIds required when scope is SINGLE or SELECTION
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  # ============================================================================
+  # PLATFORM — SEARCH
+  # ============================================================================
+
+  /platform/search:
+    get:
+      tags: [Platform — Search]
+      summary: Global search across all tenants by name, GSTIN, email, or tenant ID
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SearchResult"
